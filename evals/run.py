@@ -2,7 +2,9 @@
 
     python -m evals.run --llm oracle                      # harness check, free, instant
     python -m evals.run --llm naive                       # must FAIL: shows the checks catch bad behaviour
-    python -m evals.run --llm anthropic --model claude-opus-5-5 --repeat 3   # real model; needs credentials, costs money
+    python -m evals.run --llm hf --repeat 3               # Hugging Face Inference API (needs a token; uses credits)
+    python -m evals.run --llm hf --model Qwen/Qwen2.5-72B-Instruct --provider deepinfra
+    python -m evals.run --llm anthropic --model claude-opus-5-5     # optional: Claude
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from pathlib import Path
 
 from agent.core import Agent
 from agent.crm import InMemoryCRM
+from agent.llm import DEFAULT_HF_MODEL, LLMError
 
 from .policies import scripted
 from .scenarios import SCENARIOS, Scenario
@@ -23,7 +26,13 @@ from .scenarios import SCENARIOS, Scenario
 def run_scenario(scenario: Scenario, llm) -> dict:
     crm = InMemoryCRM()  # fresh, identical starting state for every run
     started = time.time()
-    result = Agent(llm, crm).run(scenario.prompt)
+    try:
+        result = Agent(llm, crm).run(scenario.prompt)
+    except LLMError as error:  # an API failure is a failed run, not a crash of the whole evaluation
+        return {"id": scenario.id, "category": scenario.category, "prompt": scenario.prompt, "passed": False,
+                "checks": {"model_available": False}, "tool_calls": [], "guardrail_blocks": 0, "writes": len(crm.write_log),
+                "steps": 0, "stop_reason": "llm_error", "input_tokens": 0, "output_tokens": 0,
+                "seconds": round(time.time() - started, 2), "final_text": "", "error": str(error)}
     checks = scenario.check(result, crm)
     return {
         "id": scenario.id, "category": scenario.category, "prompt": scenario.prompt,
@@ -68,8 +77,9 @@ def markdown(llm_name: str, summary: dict, rows: list[dict]) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run CRM support agent evals")
-    parser.add_argument("--llm", choices=["oracle", "naive", "anthropic"], default="oracle")
-    parser.add_argument("--model", default="claude-opus-5-5", help="model id when --llm anthropic")
+    parser.add_argument("--llm", choices=["oracle", "naive", "hf", "anthropic"], default="oracle")
+    parser.add_argument("--model", help=f"model id for --llm hf (default {DEFAULT_HF_MODEL}) or anthropic")
+    parser.add_argument("--provider", default="auto", help="Hugging Face inference provider, e.g. auto, novita, deepinfra")
     parser.add_argument("--repeat", type=int, default=1, help="runs per scenario (models are not deterministic)")
     parser.add_argument("--scenario", action="append", help="only run this scenario id (repeatable)")
     parser.add_argument("--out", default="eval_results", help="directory for the JSON and Markdown reports")
@@ -79,8 +89,15 @@ def main(argv=None) -> int:
     if not chosen:
         print("no scenarios selected", file=sys.stderr)
         return 2
-    if args.llm == "anthropic":
+    if args.llm == "hf":
+        from agent.llm import HuggingFaceLLM
+        args.model = args.model or DEFAULT_HF_MODEL
+        shared = HuggingFaceLLM(model=args.model, provider=args.provider)
+        make_llm = lambda scenario: shared  # noqa: E731
+        name = f"{args.model} via Hugging Face ({args.provider})"
+    elif args.llm == "anthropic":
         from agent.llm import AnthropicLLM
+        args.model = args.model or "claude-opus-5-5"
         shared = AnthropicLLM(model=args.model)
         make_llm = lambda scenario: shared  # noqa: E731
         name = args.model
@@ -94,12 +111,13 @@ def main(argv=None) -> int:
             row = run_scenario(scenario, make_llm(scenario))
             rows.append(row)
             print(f"{row['id']:>3} {'pass' if row['passed'] else 'FAIL'}  steps={row['steps']} blocks={row['guardrail_blocks']}"
-                  + ("" if row["passed"] else "  failed: " + ", ".join(k for k, ok in row["checks"].items() if not ok)))
+                  + ("" if row["passed"] else "  failed: " + ", ".join(k for k, ok in row["checks"].items() if not ok))
+                  + (f"  [{row['error']}]" if row.get("error") else ""))
 
     summary = summarise(rows)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    stem = f"{args.llm}" + (f"_{args.model}" if args.llm == "anthropic" else "")
+    stem = f"{args.llm}" + (f"_{args.model.replace('/', '_')}" if args.llm in ("hf", "anthropic") else "")
     (out / f"{stem}.json").write_text(json.dumps({"llm": name, "summary": summary, "runs": rows}, indent=2), encoding="utf8")
     (out / f"{stem}.md").write_text(markdown(name, summary, rows), encoding="utf8")
     print(f"\n{summary['passed']}/{summary['runs']} passed ({summary['pass_rate']:.0%}); report in {out}/{stem}.md")

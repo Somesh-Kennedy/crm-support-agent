@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from agent.llm import AnthropicLLM
+from agent.llm import AnthropicLLM, Block, to_anthropic_messages
 from agent.tools import TOOLS
 
 
@@ -47,3 +47,15 @@ def test_tool_use_and_text_blocks_are_parsed_and_raw_content_is_kept():
     assert reply.blocks[1].id == "tu_1" and reply.blocks[1].input == {"status": "New"}
     assert reply.raw_content is content  # thinking blocks must be sent back unchanged
     assert (reply.input_tokens, reply.output_tokens, reply.stop_reason) == (11, 7, "tool_use")
+
+
+def test_neutral_messages_convert_to_anthropic_format_and_replay_raw_blocks():
+    raw = [SimpleNamespace(type="thinking", thinking="", signature="s"), SimpleNamespace(type="tool_use", id="t1", name="x", input={})]
+    neutral = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "blocks": [Block("tool_use", id="t1", name="x", input={})], "raw": raw},
+        {"role": "tool_results", "results": [{"id": "t1", "content": "{}", "is_error": True}]},
+    ]
+    out = to_anthropic_messages(neutral)
+    assert out[1] == {"role": "assistant", "content": raw}
+    assert out[2] == {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "{}", "is_error": True}]}

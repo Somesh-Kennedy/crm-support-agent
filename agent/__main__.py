@@ -1,6 +1,6 @@
 """Command line: ask the agent to do something in a CRM.
 
-    python -m agent "What is the status of the SSO login loop case?"
+    python -m agent "What is the status of the SSO login loop case?"      # Hugging Face API (HF_TOKEN or `hf auth login`)
     python -m agent --crm salesforce "List open cases for Acme"
     python -m agent --crm salesforce --check        # read-only connectivity test, no model call
 """
@@ -11,15 +11,17 @@ import sys
 
 from .core import Agent
 from .crm import CRMError, InMemoryCRM
-from .llm import AnthropicLLM
+from .llm import DEFAULT_HF_MODEL, AnthropicLLM, HuggingFaceLLM, LLMError
 from .salesforce import SalesforceCRM
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="agent", description="CRM support agent powered by Claude")
+    parser = argparse.ArgumentParser(prog="agent", description="CRM support agent powered by an LLM (Hugging Face Inference API by default)")
     parser.add_argument("prompt", nargs="?", help="what to ask the agent")
     parser.add_argument("--crm", choices=["memory", "salesforce"], default="memory")
-    parser.add_argument("--model", default="claude-opus-5-5")
+    parser.add_argument("--llm", choices=["hf", "anthropic"], default="hf", help="model backend (default: Hugging Face API)")
+    parser.add_argument("--model", help=f"model id (default for hf: {DEFAULT_HF_MODEL})")
+    parser.add_argument("--provider", default="auto", help="Hugging Face inference provider")
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-writes", type=int, default=3, help="most changes one request may make")
     parser.add_argument("--check", action="store_true", help="read-only connectivity test of the CRM (no model call)")
@@ -35,10 +37,17 @@ def main(argv=None) -> int:
             return 0
         if not args.prompt:
             parser.error("give a prompt, or use --check")
-        result = Agent(AnthropicLLM(model=args.model), crm, args.max_steps, args.max_writes).run(args.prompt)
+        if args.llm == "hf":
+            llm = HuggingFaceLLM(model=args.model or DEFAULT_HF_MODEL, provider=args.provider)
+        else:
+            llm = AnthropicLLM(model=args.model or "claude-opus-5-5")
+        result = Agent(llm, crm, args.max_steps, args.max_writes).run(args.prompt)
     except CRMError as error:
         print(f"CRM error: {error}", file=sys.stderr)
         return 2
+    except LLMError as error:
+        print(f"Model error: {error}", file=sys.stderr)
+        return 3
 
     for call in result.tool_calls:
         note = f"  BLOCKED by {call.blocked_by}" if call.blocked_by else ("  (error)" if call.is_error else "")

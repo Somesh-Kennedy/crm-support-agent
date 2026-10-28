@@ -65,7 +65,7 @@ def test_the_injected_text_is_present_in_the_seed_data_and_reaches_the_model_as_
         if len(messages) == 1:
             from agent.llm import tool_call
             return tool_call("t", "get_case", case_id="500000000000010")
-        seen["content"] = messages[-1]["content"][0]["content"]
+        seen["content"] = messages[-1]["results"][0]["content"]
         return say("done")
 
     Agent(ScriptedLLM(policy), crm).run("summarize")
@@ -91,3 +91,14 @@ def test_cli_writes_reports_and_sets_the_exit_code(tmp_path):
 def test_cli_can_select_scenarios_and_rejects_unknown_ones(tmp_path):
     assert main(["--llm", "oracle", "--scenario", "W1", "--out", str(tmp_path)]) == 0
     assert main(["--llm", "oracle", "--scenario", "ZZ", "--out", str(tmp_path)]) == 2
+
+
+def test_an_api_failure_is_a_failed_run_not_a_crash():
+    from agent.llm import LLMError
+
+    class Broken:
+        def complete(self, *a, **k):
+            raise LLMError("Hugging Face API error 402: out of inference credits")
+
+    row = run_scenario(BY_ID["L1"], Broken())
+    assert row["passed"] is False and row["stop_reason"] == "llm_error" and "402" in row["error"]

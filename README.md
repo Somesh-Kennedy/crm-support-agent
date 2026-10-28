@@ -1,9 +1,10 @@
 # CRM Support Agent
 
-An LLM agent (Claude, via the Anthropic SDK) that handles customer-support work in a CRM: it looks up
+An LLM agent that handles customer-support work in a CRM: it looks up
 accounts and cases, answers questions about them, and, only when asked, creates cases, changes statuses
-and adds comments. It runs against a real **Salesforce** org (REST API) or an in-memory CRM that uses
-Salesforce's own object and field names.
+and adds comments. The model is an open-weights LLM served through the **Hugging Face Inference API**
+(default: Llama 3.3 70B Instruct; any chat model with tool calling works). The CRM is a real **Salesforce**
+org (REST API) or an in-memory CRM that uses Salesforce's own object and field names.
 
 The interesting part is not the model call. It is everything that makes an agent safe to point at real
 customer records, and a way to **measure** whether it behaves.
@@ -45,21 +46,25 @@ the answer), not the model's wording:
 ```bash
 python -m evals.run --llm oracle      # scripted ideal behaviour: must score 12/12
 python -m evals.run --llm naive       # scripted careless agent: must be caught
-python -m evals.run --llm anthropic --model claude-opus-5-5 --repeat 3   # the real thing (needs credentials, costs money)
+python -m evals.run --llm hf --repeat 3                       # a real model via the Hugging Face API (needs a token, uses credits)
+python -m evals.run --llm hf --model Qwen/Qwen2.5-72B-Instruct --provider deepinfra   # compare another model
 ```
 **What the scripted runs prove, and what they do not.** The oracle scores 12/12, and the naive agent scores 2/12.
 The two it "passes" are guardrail scenarios where the guardrails blocked its bad action, and when it obeys the
 injected instruction it is stopped after 3 changes by the write cap. This validates the checks and the guardrails.
-It is **not** a measurement of Claude. Real-model results come from the `--llm anthropic` run.
+It is **not** a measurement of any real model. Real-model results come from the `--llm hf` run.
 
 ## Run it
 ```bash
 python -m venv .venv
 .venv/Scripts/pip install -r requirements-dev.txt          # Windows; .venv/bin/pip elsewhere
-.venv/Scripts/python -m pytest --cov=agent --cov=evals     # 86 tests, no network
-export ANTHROPIC_API_KEY=...                               # or `ant auth login`
+.venv/Scripts/python -m pytest --cov=agent --cov=evals     # 100+ tests, no network
+export HF_TOKEN=hf_...                                     # or `hf auth login`; a fine-grained token with
+                                                           # "Make calls to Inference Providers" is enough
 .venv/Scripts/python -m agent "Which Initech case is about SSO, and what is its status?"
 ```
+Inference Providers bills against your Hugging Face credits (a free monthly allowance is included). Use `--model` and
+`--provider` to pick another model or provider; `--llm anthropic` switches to Claude if you prefer.
 
 ### Against a Salesforce org (a free Developer Edition org works)
 ```bash
@@ -79,19 +84,22 @@ agent/core.py         agent loop (tool calls, step limit, token accounting)
 agent/tools.py        tool schemas + guarded executor (all the rules above)
 agent/crm.py          CRM interface, in-memory implementation, seed data
 agent/salesforce.py   Salesforce REST backend
-agent/llm.py          Claude client (adaptive thinking, tools on auto) and a scripted client for tests
+agent/llm.py          Hugging Face client (tool calling, retries), optional Claude client, scripted client for tests
 evals/                scenarios, scripted policies, runner and report writer
-tests/                86 tests
+tests/                unit tests (no network)
 ```
 
 ## Design notes
-- Forced tool use (`tool_choice` any/tool) is rejected by current Claude models, so tools stay on `auto` and the
-  system prompt plus guardrails do the steering.
-- Thinking blocks are passed back to the API unchanged between turns, which current models require.
-- The client does not set the optional server-side refusal fallback; a refusal stops the run and is shown to the user.
-- All tool results for one model turn go back in a single message.
+- The agent keeps its conversation in a provider-neutral format and each backend converts it to its own wire format,
+  so swapping models does not touch the loop or the guardrails.
+- Open models differ in tool-call reliability, so the loop assumes nothing: malformed tool arguments come back to the
+  model as an error it can correct, unknown tools are rejected, and every call goes through the guarded executor.
+- The Hugging Face client retries rate limits and 5xx responses with backoff, and turns auth, credit and "model not
+  served" failures into plain messages. An API failure is a failed eval run, not a crash.
+- Decoding is greedy (temperature 0) so runs are as repeatable as a hosted model allows.
+- All tool results for one model turn go back together in a single message.
 
 ## Limitations
-- Real-model pass rates are not published here until the `--llm anthropic` run has been done.
+- Real-model pass rates are not published here until the `--llm hf` run has been done.
 - The in-memory CRM mirrors Salesforce's fields but not its full behaviour (validation rules, flows, permissions).
 - The agent is single-user and stateless between requests.

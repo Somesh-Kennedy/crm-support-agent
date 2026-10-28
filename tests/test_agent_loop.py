@@ -30,8 +30,8 @@ def test_runs_a_tool_then_answers_using_its_result():
     result, _ = run(policy)
     assert result.final_text == "found it" and result.steps == 2
     assert result.tool_calls[0].name == "search_accounts" and not result.tool_calls[0].is_error
-    block = seen["last"]["content"][0]
-    assert block["type"] == "tool_result" and block["tool_use_id"] == "t1" and "Globex" in block["content"]
+    block = seen["last"]["results"][0]
+    assert seen["last"]["role"] == "tool_results" and block["id"] == "t1" and "Globex" in block["content"]
 
 
 def test_a_blocked_action_is_reported_back_to_the_model_as_an_error():
@@ -40,7 +40,7 @@ def test_a_blocked_action_is_reported_back_to_the_model_as_an_error():
     def policy(messages):
         if len(messages) == 1:
             return tool_call("t1", "update_case_status", case_id="500000000000008", status="Closed")
-        seen["block"] = messages[-1]["content"][0]
+        seen["block"] = messages[-1]["results"][0]
         return say("I need a reason first.")
 
     result, crm = run(policy)
@@ -57,11 +57,11 @@ def test_parallel_tool_calls_return_all_results_in_one_message():
                 [Block("tool_use", id="a", name="list_cases", input={}),
                  Block("tool_use", id="b", name="search_accounts", input={"name_contains": "acme"})],
                 "tool_use", [])
-        seen["results"] = messages[-1]["content"]
+        seen["results"] = messages[-1]["results"]
         return say("done")
 
     run(policy)
-    assert [r["tool_use_id"] for r in seen["results"]] == ["a", "b"]
+    assert [r["id"] for r in seen["results"]] == ["a", "b"]
 
 
 def test_step_limit_stops_a_runaway_loop_safely():

@@ -48,7 +48,7 @@ class Agent:
 
     def run(self, user_message: str) -> RunResult:
         executor = ToolExecutor(self.crm, max_writes=self.max_writes)
-        messages: list = [{"role": "user", "content": user_message}]
+        messages: list = [{"role": "user", "content": user_message}]  # provider-neutral; see agent/llm.py
         result = RunResult(final_text="")
 
         for step in range(1, self.max_steps + 1):
@@ -61,7 +61,7 @@ class Agent:
             if response.stop_reason == "refusal":
                 result.stop_reason, result.final_text = "refusal", text or "The model declined to continue."
                 break
-            messages.append({"role": "assistant", "content": response.raw_content})
+            messages.append({"role": "assistant", "blocks": response.blocks, "raw": response.raw_content})
 
             tool_uses = [b for b in response.blocks if b.type == "tool_use"]
             if not tool_uses:
@@ -70,13 +70,12 @@ class Agent:
                 break
 
             tool_results = []
-            for block in tool_uses:  # all results go back in ONE user message
+            for block in tool_uses:  # all results go back together, in one message
                 outcome = executor.execute(block.name, block.input)
-                result.tool_calls.append(ToolCall(block.name, block.input or {}, outcome.text,
+                result.tool_calls.append(ToolCall(block.name, block.input if isinstance(block.input, dict) else {}, outcome.text,
                                                   outcome.is_error, outcome.blocked_by))
-                tool_results.append({"type": "tool_result", "tool_use_id": block.id,
-                                     "content": outcome.text, "is_error": outcome.is_error})
-            messages.append({"role": "user", "content": tool_results})
+                tool_results.append({"id": block.id, "content": outcome.text, "is_error": outcome.is_error})
+            messages.append({"role": "tool_results", "results": tool_results})
         else:
             result.stop_reason = "max_steps"
             result.final_text = "I stopped because this request needed more steps than allowed. Nothing further was changed."
