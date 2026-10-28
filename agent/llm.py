@@ -84,34 +84,63 @@ class HuggingFaceLLM:
     """
 
     def __init__(self, model: str = DEFAULT_HF_MODEL, provider: str = "auto", token: str | None = None,
-                 max_tokens: int = 1024, max_retries: int = 3, client: Any = None,
+                 max_tokens: int = 2048, max_retries: int = 6, timeout: float = 90.0, client: Any = None,
                  sleep: Callable[[float], None] = time.sleep):
         if client is None:
             from huggingface_hub import InferenceClient  # imported lazily so offline tests need no network setup
-            client = InferenceClient(model=model, provider=provider, token=token)
+            # A request that never returns would hang the whole run, so always set a timeout.
+            client = InferenceClient(model=model, provider=provider, token=token, timeout=timeout)
         self.client, self.model, self.max_tokens = client, model, max_tokens
         self.max_retries, self._sleep = max_retries, sleep
 
+    @staticmethod
+    def _wait_time(error: Exception, default: float) -> float:
+        """Honour the provider's Retry-After header (free tiers rate-limit hard); otherwise use our own backoff."""
+        headers = getattr(getattr(error, "response", None), "headers", None) or {}
+        try:
+            return min(max(float(headers.get("retry-after", default)), 0.5), 65.0)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _is_generation_glitch(error: Exception) -> bool:
+        """The provider could not parse the model's own tool-call output. Sampling again usually fixes it."""
+        text = str(error)
+        return "Parsing failed" in text or "tool_use_failed" in text or "failed_generation" in text
+
     def _create(self, **kwargs):
         delay = 2.0
+        glitches = 0
         for attempt in range(1, self.max_retries + 1):
             try:
                 return self.client.chat_completion(**kwargs)
             except Exception as error:  # huggingface_hub raises several error types; classify by HTTP status
                 status = getattr(getattr(error, "response", None), "status_code", None)
-                retryable = status in (408, 429, 500, 502, 503, 504) or "timed out" in str(error).lower()
+                if self._is_generation_glitch(error) and glitches < 3 and attempt < self.max_retries:
+                    glitches += 1
+                    kwargs = {**kwargs, "temperature": 0.3 * glitches}  # a little randomness so the retry is not identical
+                    continue
+                retryable = (status in (408, 429, 500, 502, 503, 504) or "timed out" in str(error).lower()
+                             or "timeout" in type(error).__name__.lower())
                 if not retryable or attempt == self.max_retries:
                     hint = {401: " (check your Hugging Face token)", 402: " (out of inference credits)",
                             403: " (token lacks permission for this model)", 404: " (model not served by any provider)"}.get(status, "")
                     raise LLMError(f"Hugging Face API error{f' {status}' if status else ''}: {str(error)[:200]}{hint}") from error
-                self._sleep(delay)
-                delay *= 2
+                self._sleep(self._wait_time(error, delay))
+                delay = min(delay * 2, 30.0)
 
     def complete(self, system: str, messages: list, tools: list) -> LLMResponse:
-        response = self._create(messages=to_openai_messages(system, messages), tools=to_openai_tools(tools),
-                                max_tokens=self.max_tokens, temperature=0.0)
-        if not getattr(response, "choices", None):
-            raise LLMError("Hugging Face API returned no choices")
+        request = dict(messages=to_openai_messages(system, messages), tools=to_openai_tools(tools), max_tokens=self.max_tokens)
+        response = None
+        for attempt in range(3):
+            # Greedy decoding (temperature 0) can get stuck repeating itself and return nothing at all.
+            # A turn with no text and no tool call is never useful, so resample with a little randomness.
+            response = self._create(temperature=0.0 if attempt == 0 else 0.3 * attempt, **request)
+            if not getattr(response, "choices", None):
+                raise LLMError("Hugging Face API returned no choices")
+            message = response.choices[0].message
+            if (message.content or "").strip() or message.tool_calls:
+                break
         choice = response.choices[0]
         message = choice.message
         blocks = []

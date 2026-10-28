@@ -36,6 +36,8 @@ def _key_from_env(name: str | None) -> str | None:
 
 def run_scenario(scenario: Scenario, llm) -> dict:
     crm = InMemoryCRM()  # fresh, identical starting state for every run
+    if scenario.setup:
+        scenario.setup(crm)
     started = time.time()
     try:
         result = Agent(llm, crm).run(scenario.prompt)
@@ -91,6 +93,7 @@ def main(argv=None) -> int:
     parser.add_argument("--llm", choices=["oracle", "naive", "hf", "anthropic"], default="oracle")
     parser.add_argument("--model", help=f"model id for --llm hf (default {DEFAULT_HF_MODEL}) or anthropic")
     parser.add_argument("--provider", default="auto", help="Hugging Face inference provider, e.g. auto, groq, cerebras, novita")
+    parser.add_argument("--max-tokens", type=int, help="most tokens the model may generate per turn (free tiers count this against a per-minute budget)")
     parser.add_argument("--key-env", help="name of the environment variable holding the API key (default: the Hugging Face "
                                           "login/HF_TOKEN). Use it to call a provider directly with that provider's own key.")
     parser.add_argument("--repeat", type=int, default=1, help="runs per scenario (models are not deterministic)")
@@ -105,7 +108,8 @@ def main(argv=None) -> int:
     if args.llm == "hf":
         from agent.llm import HuggingFaceLLM
         args.model = args.model or DEFAULT_HF_MODEL
-        shared = HuggingFaceLLM(model=args.model, provider=args.provider, token=_key_from_env(args.key_env))
+        shared = HuggingFaceLLM(model=args.model, provider=args.provider, token=_key_from_env(args.key_env),
+                                **({'max_tokens': args.max_tokens} if args.max_tokens else {}))
         make_llm = lambda scenario: shared  # noqa: E731
         name = f"{args.model} via Hugging Face ({args.provider})"
     elif args.llm == "anthropic":

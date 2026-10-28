@@ -54,7 +54,7 @@ def test_request_is_deterministic_and_bounded():
     model, client = llm(completion("hi"))
     model.complete("sys", [{"role": "user", "content": "x"}], TOOLS)
     sent = client.requests[0]
-    assert sent["temperature"] == 0.0 and sent["max_tokens"] == 1024
+    assert sent["temperature"] == 0.0 and sent["max_tokens"] == 2048
     assert sent["messages"][0] == {"role": "system", "content": "sys"}
     assert "tool_choice" not in sent
 
@@ -132,10 +132,19 @@ def test_rate_limits_are_retried_then_succeed():
 
 
 def test_retries_give_up_with_a_clear_error():
-    model, client = llm(HttpError(429), HttpError(429), HttpError(429))
+    model, client = llm(*[HttpError(429) for _ in range(6)])
     with pytest.raises(LLMError, match="429"):
         model.complete("s", [], TOOLS)
-    assert len(client.requests) == 3
+    assert len(client.requests) == 6
+
+
+def test_the_retry_after_header_is_honoured():
+    slow = HttpError(429)
+    slow.response.headers = {"retry-after": "7"}
+    sleeps = []
+    client = FakeClient(slow, completion("ok"))
+    HuggingFaceLLM(client=client, sleep=sleeps.append).complete("s", [], TOOLS)
+    assert sleeps == [7.0]
 
 
 @pytest.mark.parametrize("status, hint", [(401, "token"), (402, "credits"), (404, "not served")])
@@ -144,3 +153,67 @@ def test_non_retryable_errors_fail_fast_with_a_helpful_hint(status, hint):
     with pytest.raises(LLMError, match=hint):
         model.complete("s", [], TOOLS)
     assert len(client.requests) == 1
+
+
+def test_a_provider_side_parse_failure_is_retried_with_a_little_randomness():
+    glitch = HttpError(400, "Parsing failed. The model generated output that could not be parsed. failed_generation")
+    client = FakeClient(glitch, completion("ok"))
+    model = HuggingFaceLLM(client=client, sleep=lambda s: None)
+    assert model.complete("s", [], TOOLS).blocks[0].text == "ok"
+    assert [r["temperature"] for r in client.requests] == [0.0, 0.3]
+
+
+def test_persistent_parse_failures_eventually_surface_as_an_error():
+    glitch = lambda: HttpError(400, "tool_use_failed")  # noqa: E731
+    model, client = llm(*[glitch() for _ in range(6)])
+    with pytest.raises(LLMError):
+        model.complete("s", [], TOOLS)
+    assert len(client.requests) <= 6
+
+
+def test_default_output_budget_leaves_room_for_reasoning_models():
+    assert HuggingFaceLLM(client=FakeClient()).max_tokens >= 2048
+
+
+def test_an_empty_turn_is_resampled_with_a_little_randomness():
+    empty = completion("", None, finish="length")
+    model, client = llm(empty, empty, completion("Here you go."))
+    reply = model.complete("s", [], TOOLS)
+    assert reply.blocks[0].text == "Here you go."
+    assert [r["temperature"] for r in client.requests] == [0.0, 0.3, 0.6]
+
+
+def test_a_turn_that_is_empty_every_time_is_returned_not_looped_forever():
+    empty = completion("", None, finish="length")
+    model, client = llm(empty, empty, empty)
+    reply = model.complete("s", [], TOOLS)
+    assert reply.blocks == [] and reply.stop_reason == "max_tokens" and len(client.requests) == 3
+
+
+def test_a_normal_answer_is_not_resampled():
+    model, client = llm(completion("fine"))
+    model.complete("s", [], TOOLS)
+    assert len(client.requests) == 1
+
+
+def test_the_real_client_is_always_created_with_a_timeout(monkeypatch):
+    import huggingface_hub
+    seen = {}
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(huggingface_hub, "InferenceClient", Recorder)
+    HuggingFaceLLM(model="m", provider="groq", token="t")
+    assert seen["timeout"] == 90.0 and seen["provider"] == "groq" and seen["model"] == "m"
+
+
+def test_a_timed_out_request_is_retried():
+    class ReadTimeout(Exception):
+        pass
+
+    client = FakeClient(ReadTimeout("The read operation timed out"), completion("ok"))
+    model = HuggingFaceLLM(client=client, sleep=lambda s: None)
+    assert model.complete("s", [], TOOLS).blocks[0].text == "ok"
+    assert len(client.requests) == 2
