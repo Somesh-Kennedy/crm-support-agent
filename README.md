@@ -63,8 +63,17 @@ export HF_TOKEN=hf_...                                     # or `hf auth login`;
                                                            # "Make calls to Inference Providers" is enough
 .venv/Scripts/python -m agent "Which Initech case is about SSO, and what is its status?"
 ```
-Inference Providers bills against your Hugging Face credits (a free monthly allowance is included). Use `--model` and
+Inference Providers bills against your Hugging Face credits (a small free monthly allowance is included). Use `--model` and
 `--provider` to pick another model or provider; `--llm anthropic` switches to Claude if you prefer.
+
+**No Hugging Face credits?** `huggingface_hub` can call a provider directly with that provider's own API key, which
+does not use your Hugging Face credits. Many providers have free tiers (for example Groq or Cerebras):
+```bash
+export GROQ_API_KEY=...                       # create a free key in the provider's console
+python -m evals.run --llm hf --provider groq --model openai/gpt-oss-20b --key-env GROQ_API_KEY --repeat 3
+python -m agent --llm hf --provider groq --model openai/gpt-oss-20b --key-env GROQ_API_KEY "Show open cases for Acme"
+```
+The key is read from the named environment variable, never from the command line.
 
 ### Against a Salesforce org (a free Developer Edition org works)
 ```bash

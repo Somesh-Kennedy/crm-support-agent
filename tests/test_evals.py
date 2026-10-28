@@ -102,3 +102,14 @@ def test_an_api_failure_is_a_failed_run_not_a_crash():
 
     row = run_scenario(BY_ID["L1"], Broken())
     assert row["passed"] is False and row["stop_reason"] == "llm_error" and "402" in row["error"]
+
+
+def test_key_env_reads_the_key_from_the_environment_and_fails_clearly_when_missing(monkeypatch):
+    import pytest as _pytest
+    from evals.run import _key_from_env
+    assert _key_from_env(None) is None
+    monkeypatch.setenv("MY_KEY", "abc")
+    assert _key_from_env("MY_KEY") == "abc"
+    monkeypatch.delenv("MY_KEY")
+    with _pytest.raises(SystemExit, match="MY_KEY"):
+        _key_from_env("MY_KEY")

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import defaultdict
@@ -21,6 +22,16 @@ from agent.llm import DEFAULT_HF_MODEL, LLMError
 
 from .policies import scripted
 from .scenarios import SCENARIOS, Scenario
+
+
+def _key_from_env(name: str | None) -> str | None:
+    """Read an API key from the named environment variable (never from the command line, so it stays out of history)."""
+    if not name:
+        return None
+    key = os.environ.get(name)
+    if not key:
+        raise SystemExit(f"Environment variable {name} is not set")
+    return key
 
 
 def run_scenario(scenario: Scenario, llm) -> dict:
@@ -79,7 +90,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run CRM support agent evals")
     parser.add_argument("--llm", choices=["oracle", "naive", "hf", "anthropic"], default="oracle")
     parser.add_argument("--model", help=f"model id for --llm hf (default {DEFAULT_HF_MODEL}) or anthropic")
-    parser.add_argument("--provider", default="auto", help="Hugging Face inference provider, e.g. auto, novita, deepinfra")
+    parser.add_argument("--provider", default="auto", help="Hugging Face inference provider, e.g. auto, groq, cerebras, novita")
+    parser.add_argument("--key-env", help="name of the environment variable holding the API key (default: the Hugging Face "
+                                          "login/HF_TOKEN). Use it to call a provider directly with that provider's own key.")
     parser.add_argument("--repeat", type=int, default=1, help="runs per scenario (models are not deterministic)")
     parser.add_argument("--scenario", action="append", help="only run this scenario id (repeatable)")
     parser.add_argument("--out", default="eval_results", help="directory for the JSON and Markdown reports")
@@ -92,7 +105,7 @@ def main(argv=None) -> int:
     if args.llm == "hf":
         from agent.llm import HuggingFaceLLM
         args.model = args.model or DEFAULT_HF_MODEL
-        shared = HuggingFaceLLM(model=args.model, provider=args.provider)
+        shared = HuggingFaceLLM(model=args.model, provider=args.provider, token=_key_from_env(args.key_env))
         make_llm = lambda scenario: shared  # noqa: E731
         name = f"{args.model} via Hugging Face ({args.provider})"
     elif args.llm == "anthropic":

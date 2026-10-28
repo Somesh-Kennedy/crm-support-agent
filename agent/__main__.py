@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .core import Agent
@@ -21,7 +22,8 @@ def main(argv=None) -> int:
     parser.add_argument("--crm", choices=["memory", "salesforce"], default="memory")
     parser.add_argument("--llm", choices=["hf", "anthropic"], default="hf", help="model backend (default: Hugging Face API)")
     parser.add_argument("--model", help=f"model id (default for hf: {DEFAULT_HF_MODEL})")
-    parser.add_argument("--provider", default="auto", help="Hugging Face inference provider")
+    parser.add_argument("--provider", default="auto", help="Hugging Face inference provider, e.g. auto, groq, cerebras")
+    parser.add_argument("--key-env", help="environment variable holding a provider's own API key (calls that provider directly)")
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-writes", type=int, default=3, help="most changes one request may make")
     parser.add_argument("--check", action="store_true", help="read-only connectivity test of the CRM (no model call)")
@@ -38,7 +40,10 @@ def main(argv=None) -> int:
         if not args.prompt:
             parser.error("give a prompt, or use --check")
         if args.llm == "hf":
-            llm = HuggingFaceLLM(model=args.model or DEFAULT_HF_MODEL, provider=args.provider)
+            key = os.environ.get(args.key_env) if args.key_env else None
+            if args.key_env and not key:
+                parser.error(f"environment variable {args.key_env} is not set")
+            llm = HuggingFaceLLM(model=args.model or DEFAULT_HF_MODEL, provider=args.provider, token=key)
         else:
             llm = AnthropicLLM(model=args.model or "claude-opus-5-5")
         result = Agent(llm, crm, args.max_steps, args.max_writes).run(args.prompt)
